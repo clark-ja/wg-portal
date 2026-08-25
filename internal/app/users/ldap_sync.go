@@ -193,6 +193,42 @@ func (m Manager) disableMissingLdapUsers(
 	rawUsers []internal.RawLdapUser,
 	fields *config.LdapFields,
 ) error {
+	// Collect the identifiers the directory actually returned. A hard LDAP
+	// failure is already handled by the caller, but a search that *succeeds*
+	// and yields nothing usable is indistinguishable here from "every user was
+	// removed from the directory". In practice that means a wrong base DN, a
+	// sync_filter that no longer matches, a replica that is up but not yet
+	// populated, a field map pointing at an attribute the server does not
+	// return, or a bind account that has lost read access to the user subtree.
+	// LDAP offers nothing to tell those apart: a search that matches nobody and
+	// one the client is not allowed to answer both come back as success with
+	// zero entries, and a directory server may reply that way for a base DN
+	// that does not exist rather than disclose it to an unprivileged client.
+	//
+	// Acting on it disables every LDAP-sourced user at once, and through
+	// TopicUserDisabled that removes each of their peers from the WireGuard
+	// device rather than only flagging them. The search succeeded, so no error
+	// is logged, and every message on this path is Debug: at the default log
+	// level the whole thing is silent. It also repeats every sync interval.
+	// Refuse instead. The cost is that a directory intentionally emptied of all
+	// users disables nobody; leaving a single account in scope restores the
+	// normal behaviour for everyone else.
+	ldapUserIds := make(map[domain.UserIdentifier]struct{}, len(rawUsers))
+	for _, rawUser := range rawUsers {
+		if userId := ldapUserIdentifier(rawUser, fields.UserIdentifier); userId != "" {
+			ldapUserIds[userId] = struct{}{}
+		}
+	}
+	if len(ldapUserIds) == 0 {
+		slog.Error("refusing to disable missing LDAP users: directory returned no usable user identifiers",
+			"provider", providerName,
+			"raw-entries", len(rawUsers),
+			"identifier-field", fields.UserIdentifier,
+			"hint", "check base_dn, sync_filter and the bind account's read permissions; "+
+				"if the directory is intentionally empty, keep one account matching sync_filter")
+		return nil
+	}
+
 	allUsers, err := m.users.GetAllUsers(ctx)
 	if err != nil {
 		return err
@@ -215,20 +251,14 @@ func (m Manager) disableMissingLdapUsers(
 			continue // skip sync for this user
 		}
 
-		existsInLDAP := false
-		for _, rawUser := range rawUsers {
-			userId := ldapUserIdentifier(rawUser, fields.UserIdentifier)
-			if user.Identifier == userId {
-				existsInLDAP = true
-				break
-			}
-		}
-
-		if existsInLDAP {
+		if _, existsInLDAP := ldapUserIds[user.Identifier]; existsInLDAP {
 			continue
 		}
 
-		slog.Debug("user is missing in ldap provider, disabling", "user", user.Identifier, "provider", providerName)
+		// Warn, not Debug: this removes the user's peers from the device, and at
+		// the default log level a Debug line would make a mass disable silent.
+		slog.Warn("user is missing in ldap provider, disabling",
+			"user", user.Identifier, "provider", providerName)
 
 		now := time.Now()
 		user.Disabled = &now

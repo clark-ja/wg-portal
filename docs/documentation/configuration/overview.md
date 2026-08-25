@@ -827,6 +827,14 @@ Below are the properties for each LDAP provider entry inside `auth.ldap`:
 #### `disable_missing`
 - **Default:** `false`
 - **Description:** If `true`, any user **not** found in LDAP (during sync) is disabled in WireGuard Portal.
+- **Important**: As a safeguard, a synchronization that returns no usable user identifiers at all disables
+  nobody. LDAP cannot distinguish a directory that legitimately holds no matching users from a wrong `base_dn`,
+  a `sync_filter` whose group was renamed, a replica that is reachable but not yet populated, or a bind account
+  that has lost read access — all of them answer with success and zero entries. Disabling every user on that
+  signal would lock administrators out of a portal they may only reach over the VPN, so the sync logs an error
+  and skips the disable step instead.
+  If you intend to empty a group, keep one account matching `sync_filter`: the remaining users are then disabled
+  normally, and the account doubles as a canary, since its disappearance means the query itself is broken.
 
 #### `auto_re_enable`
 - **Default:** `false`
