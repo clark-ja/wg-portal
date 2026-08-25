@@ -40,6 +40,8 @@ type PeerDatabaseRepo interface {
 }
 
 type InterfaceDatabaseRepo interface {
+	// GetInterface returns the interface with the given identifier.
+	GetInterface(ctx context.Context, id domain.InterfaceIdentifier) (*domain.Interface, error)
 	// SaveInterface saves the interface with the given identifier.
 	SaveInterface(ctx context.Context, id domain.InterfaceIdentifier, updateFunc func(i *domain.Interface) (*domain.Interface, error)) error
 }

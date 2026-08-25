@@ -281,28 +281,53 @@ func (m Manager) updateInterfaceLdapFilters(
 			}
 		}
 
-		// Save the interface
-		err = m.interfaces.SaveInterface(ctx, ifaceId, func(i *domain.Interface) (*domain.Interface, error) {
-			if i.LdapAllowedUsers == nil {
-				i.LdapAllowedUsers = make(map[string][]domain.UserIdentifier)
-			}
-			i.LdapAllowedUsers[provider.ProviderName] = matchedUserIds
-			return i, nil
-		})
-		if err != nil {
-			slog.Error("failed to save interface ldap allowed users",
-				"interface", ifaceId,
-				"provider", provider.ProviderName,
-				"error", err)
-		} else {
-			slog.Debug("updated interface ldap allowed users",
-				"interface", ifaceId,
-				"provider", provider.ProviderName,
-				"matched_count", len(matchedUserIds))
-		}
+		m.applyInterfaceLdapFilter(ctx, ifaceId, provider.ProviderName, matchedUserIds)
 	}
 
 	return nil
+}
+
+// applyInterfaceLdapFilter stores the users an LDAP filter matched onto an
+// existing interface.
+//
+// It deliberately does not create the interface. SaveInterface would, which is
+// wrong twice over: an interface_filter entry is a statement about who may use
+// an interface, not a reason to bring one into existence, and the row it
+// creates has no backend. It also races the startup importer, which snapshots
+// the interface list before its device round-trips and then fails with
+// "interface already exists" once it finds the row.
+func (m Manager) applyInterfaceLdapFilter(
+	ctx context.Context,
+	ifaceId domain.InterfaceIdentifier,
+	providerName string,
+	matchedUserIds []domain.UserIdentifier,
+) {
+	if _, err := m.interfaces.GetInterface(ctx, ifaceId); err != nil {
+		if errors.Is(err, domain.ErrNotFound) {
+			slog.Warn("skipping interface filter for unknown interface",
+				"interface", ifaceId, "provider", providerName)
+		} else {
+			slog.Error("failed to look up interface for ldap filter",
+				"interface", ifaceId, "provider", providerName, "error", err)
+		}
+		return
+	}
+
+	err := m.interfaces.SaveInterface(ctx, ifaceId, func(i *domain.Interface) (*domain.Interface, error) {
+		if i.LdapAllowedUsers == nil {
+			i.LdapAllowedUsers = make(map[string][]domain.UserIdentifier)
+		}
+		i.LdapAllowedUsers[providerName] = matchedUserIds
+		return i, nil
+	})
+	if err != nil {
+		slog.Error("failed to save interface ldap allowed users",
+			"interface", ifaceId, "provider", providerName, "error", err)
+		return
+	}
+
+	slog.Debug("updated interface ldap allowed users",
+		"interface", ifaceId, "provider", providerName, "matched_count", len(matchedUserIds))
 }
 
 func ldapUserIdentifier(rawUser map[string]any, field string) domain.UserIdentifier {
